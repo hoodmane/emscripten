@@ -649,6 +649,19 @@ def filter_out_duplicate_dynamic_libs(inputs):
 
 
 def process_dynamic_libs(dylibs):
+  extras = []
+  seen = set()
+  for dylib in dylibs:
+    dylink = webassembly.parse_dylink_section(dylib)[0]
+    for needed in dylink.needed:
+      if needed in seen:
+        continue
+      if os.path.exists(needed):
+        extras.append(needed)
+      else:
+        diagnostics.warning('emcc', '{dylib}: shared library dependency not found: `{needed}`')
+
+  dylibs += extras
   for dylib in dylibs:
     imports = webassembly.get_imports(dylib)
     imports = [i.field for i in imports if i.kind in (webassembly.ExternType.FUNC, webassembly.ExternType.GLOBAL)]
@@ -1709,7 +1722,9 @@ def phase_setup(state):
   if settings.SIDE_MODULE and settings.GLOBAL_BASE != -1:
     exit_with_error('Cannot set GLOBAL_BASE when building SIDE_MODULE')
 
-  if settings.RELOCATABLE or settings.LINKABLE:
+  # When building a side module we currently have to assume that any undefined
+  # symbols that exist at link time will be satisfied by the main module or JS.
+  if settings.SIDE_MODULE:
     default_setting('ERROR_ON_UNDEFINED_SYMBOLS', 0)
     default_setting('WARN_ON_UNDEFINED_SYMBOLS', 0)
 

@@ -20,6 +20,12 @@ See docs/process.md for more on how version tagging works.
 
 Current Trunk
 -------------
+- When building with `-s MAIN_MODULE` emscripten will now error on undefined
+  symbol by default.  This assumes that your side modules will be present on the
+  command line.  If you are not specifying your side modules on the command line
+  (hopefully a rare case) you may need to add `-s WARN_ON_UNDEFINED_SYMBOLS=0`
+  if you see errors about missing symbols that exist in your (runtime provided)
+  side modules.
 - The `RUNTIME_LINKED_LIBS` setting is now deprecated.  It's better to simply
   list dynamic library dependencies directly on the command line.
 
