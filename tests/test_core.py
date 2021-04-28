@@ -465,6 +465,7 @@ class TestCoreBase(RunnerCore):
   @needs_make('make')
   def test_cube2hash(self):
     # A good test of i64 math
+    self.emcc_args.append('-Wno-unused-command-line-argument')
     self.do_run('// empty file', 'Usage: hashstring <seed>',
                 libraries=self.get_library(os.path.join('third_party', 'cube2hash'), ['libcube2hash.a'], configure=None),
                 includes=[test_file('third_party', 'cube2hash')], assert_returncode=NON_ZERO)

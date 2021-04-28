@@ -20,6 +20,9 @@ See docs/process.md for more on how version tagging works.
 
 Current Trunk
 -------------
+- Emscripten will now warn when linker-only `-s` settings are specified at
+  compile time.  This warning can be disabled using the standard clang flag:
+  `-Wno-unused-command-line-argument`
 - The `RUNTIME_LINKED_LIBS` setting is now deprecated.  It's better to simply
   list dynamic library dependencies directly on the command line.
 
