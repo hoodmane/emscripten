@@ -340,6 +340,9 @@ var LibraryDylink = {
           entry.value = {{{ to64(0) }}};
           continue;
         }
+        else if (!value) {
+            throw new Error(`Dynamic linking error: undefined symbol '${symName}'`);
+        }
 #if ASSERTIONS
         assert(value, `undefined symbol '${symName}'. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment`);
 #endif
@@ -784,6 +787,9 @@ var LibraryDylink = {
             var resolved;
             stubs[prop] = (...args) => {
               resolved ||= resolveSymbol(prop);
+              if (!resolved) {
+                throw new Error(`Dynamic linking error: cannot resolve symbol ${prop}`);
+              }
               return resolved(...args);
             };
           }
