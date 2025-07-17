@@ -715,7 +715,16 @@ var SyscallsLibrary = {
     for (var idx = startIdx; idx < endIdx; idx++) {
       var id;
       var type;
-      var name = stream.getdents[idx];
+      var name;
+      var mode = null;
+      var de = stream.getdents[idx];
+      if (typeof de === "string") {
+        name = de;
+      } else {
+        name = de.name;
+        mode = de.mode;
+        id = de.id;
+      }
       if (name === '.') {
         id = stream.node.id;
         type = 4; // DT_DIR
@@ -727,20 +736,23 @@ var SyscallsLibrary = {
       }
       else {
         var child;
-        try {
-          child = FS.lookupNode(stream.node, name);
-        } catch (e) {
-          // If the entry is not a directory, file, or symlink, nodefs
-          // lookupNode will raise EINVAL. Skip these and continue.
-          if (e?.errno === {{{ cDefs.EINVAL }}}) {
-            continue;
+        if (mode === null) {
+          try {
+            child = FS.lookupNode(stream.node, name);
+          } catch (e) {
+            // If the entry is not a directory, file, or symlink, nodefs
+            // lookupNode will raise EINVAL. Skip these and continue.
+            if (e?.errno === {{{ cDefs.EINVAL }}}) {
+              continue;
+            }
+            throw e;
           }
-          throw e;
+          id = child.id;
+          mode = child.mode;
         }
-        id = child.id;
-        type = FS.isChrdev(child.mode) ? 2 :  // DT_CHR, character device.
-               FS.isDir(child.mode) ? 4 :     // DT_DIR, directory.
-               FS.isLink(child.mode) ? 10 :   // DT_LNK, symbolic link.
+        type = FS.isChrdev(mode) ? 2 :  // DT_CHR, character device.
+               FS.isDir(mode) ? 4 :     // DT_DIR, directory.
+               FS.isLink(mode) ? 10 :   // DT_LNK, symbolic link.
                8;                             // DT_REG, regular file.
       }
 #if ASSERTIONS

@@ -6025,6 +6025,13 @@ Module.onRuntimeInitialized = () => {
   def test_fs_readdir_ino_matches_stat_ino(self):
     self.do_runf('fs/test_fs_readdir_ino_matches_stat_ino.c', 'success')
 
+  @crossplatform
+  def test_fs_readdir_no_execute_permission(self):
+    # TODO: add with_all_fs.
+    # It fails on nodefs and rawfs.
+    # It passes on all wasmfs combinations.
+    self.do_run_in_out_file_test('fs/test_fs_readdir_no_execute_permission.c')
+
   @also_with_nodefs_both
   @crossplatform
   @no_windows('https://github.com/emscripten-core/emscripten/issues/8882')
