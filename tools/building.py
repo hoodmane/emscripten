@@ -232,6 +232,7 @@ def lld_flags_for_executable(external_symbols):
     if settings.LINKABLE:
       cmd.append('--export-dynamic')
     cmd.append('--export-table')
+    cmd.append('--export-externref-table')
     if settings.ALLOW_TABLE_GROWTH:
       cmd.append('--growable-table')
 

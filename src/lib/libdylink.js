@@ -192,6 +192,7 @@ var LibraryDylink = {
       '__table_base',
       '__stack_pointer',
       '__indirect_function_table',
+      '__externref_table',
       '__cpp_exception',
       '__c_longjmp',
       '__wasm_apply_data_relocs',
@@ -498,13 +499,15 @@ var LibraryDylink = {
       failIf(name !== 'dylink.0');
     }
 
-    var customSection = { neededDynlibs: [], tlsExports: new Set(), weakImports: new Set(), runtimePaths: [] };
+    var customSection = { neededDynlibs: [], tlsExports: new Set(), externrefExports: new Set(), weakImports: new Set(), runtimePaths: [] };
     var WASM_DYLINK_MEM_INFO = 0x1;
     var WASM_DYLINK_NEEDED = 0x2;
     var WASM_DYLINK_EXPORT_INFO = 0x3;
     var WASM_DYLINK_IMPORT_INFO = 0x4;
     var WASM_DYLINK_RUNTIME_PATH = 0x5;
+    var WASM_DYLINK_MEM_INFO_EXTERNREFS = 0x6;
     var WASM_SYMBOL_TLS = 0x100;
+    var WASM_SYMBOL_EXTERNREF = 0x400;
     var WASM_SYMBOL_BINDING_MASK = 0x3;
     var WASM_SYMBOL_BINDING_WEAK = 0x1;
     while (offset < end) {
@@ -525,6 +528,9 @@ var LibraryDylink = {
           if (flags & WASM_SYMBOL_TLS) {
             customSection.tlsExports.add(symname);
           }
+          if (flags & WASM_SYMBOL_EXTERNREF) {
+            customSection.externrefExports.add(symname);
+          }
         }
       } else if (subsectionType === WASM_DYLINK_IMPORT_INFO) {
         var count = getLEB();
@@ -538,6 +544,9 @@ var LibraryDylink = {
         }
       } else if (subsectionType === WASM_DYLINK_RUNTIME_PATH) {
         customSection.runtimePaths = getStringList();
+      } else if (subsectionType === WASM_DYLINK_MEM_INFO_EXTERNREFS) {
+        customSection.externrefTableSize = getLEB();
+        customSection.externrefTableAlign = getLEB();
       } else {
 #if ASSERTIONS
         err('unknown dylink.0 subsection:', subsectionType)
@@ -681,6 +690,7 @@ var LibraryDylink = {
         // prepare memory
         var memoryBase = metadata.memorySize ? alignMemory(getMemory(metadata.memorySize + memAlign), memAlign) : 0; // TODO: add to cleanups
         var tableBase = metadata.tableSize ? {{{ from64Expr('wasmTable.length') }}} : 0;
+        var externrefTableBase = metadata.externrefTableSize ? {{{ from64Expr('___externref_table.length') }}} : 0;
         if (handle) {
           {{{ makeSetValue('handle', C_STRUCTS.dso.mem_allocated, '1', 'i8') }}};
           {{{ makeSetValue('handle', C_STRUCTS.dso.mem_addr, 'memoryBase', '*') }}};
@@ -705,6 +715,16 @@ var LibraryDylink = {
         dbg("loadModule: growing table by: " + metadata.tableSize);
 #endif
         wasmTable.grow({{{ toIndexType('metadata.tableSize') }}});
+      }
+      if (metadata.externrefTableSize) {
+        var growBy = metadata.externrefTableSize;
+        if (externrefTableBase === 0) {
+          // Make sure not to relocate a symbol to index 0, 0 is reserved for
+          // null pointer.
+          externrefTableBase ++;
+          growBy ++;
+        }
+        ___externref_table.grow(growBy)
       }
 #if DYLINK_DEBUG
       dbg(`loadModule: memory[${memoryBase}:${memoryBase + metadata.memorySize}]` +
@@ -751,6 +771,8 @@ var LibraryDylink = {
               return {{{ to64('memoryBase') }}};
             case '__table_base':
               return {{{ to64('tableBase') }}};
+            case '__externref_table_base':
+              return {{{ to64('externrefTableBase') }}};
 #if MEMORY64
 #if MEMORY64 == 2
             case '__memory_base32':
@@ -788,6 +810,7 @@ var LibraryDylink = {
       var info = {
         'GOT.mem': GOTProxy,
         'GOT.func': GOTProxy,
+        'GOT.externref': GOTProxy,
         'env': proxy,
         '{{{ WASI_MODULE_NAME }}}': proxy,
       };
@@ -811,6 +834,16 @@ var LibraryDylink = {
         updateTableMap(tableBase, metadata.tableSize);
         moduleExports = relocateExports(instance.exports, memoryBase);
         updateGOT(moduleExports);
+        // Externref exports are __externref_table slot indices relative to
+        // __externref_table_base, not linear-memory addresses.  The pass above
+        // (incorrectly) relocated them against memoryBase, so re-relocate them
+        // against externrefTableBase and overwrite the GOT entries.  This
+        // mirrors the TLS-export handling in `registerTLSInit`.
+        if (metadata.externrefExports.size) {
+          var externrefExports = {};
+          metadata.externrefExports.forEach((s) => externrefExports[s] = instance.exports[s]);
+          updateGOT(relocateExports(externrefExports, externrefTableBase), /*replace=*/true);
+        }
 #if ASYNCIFY
         moduleExports = Asyncify.instrumentWasmExports(moduleExports);
 #endif
