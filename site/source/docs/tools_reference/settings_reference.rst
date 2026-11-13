@@ -1625,6 +1625,27 @@ Corresponds to MAIN_MODULE (also supports modes 1 and 2)
 
 Default value: 0
 
+.. _dylink_wasm_stubs:
+
+DYLINK_WASM_STUBS
+=================
+
+When a side module imports a symbol that is not yet defined (for example
+because it is provided by a library that is loaded later), the dynamic
+linker binds the import to a stub that resolves the symbol on first use.
+By default these stubs are JS functions.  When this setting is enabled the
+stubs are instead generated as small WebAssembly modules so that the onward
+call is made directly from wasm.  This allows calls through late-bound
+symbols to be suspended with JSPI (JS frames cannot be suspended) and avoids
+NaN canonicalization of arguments that pass through JS.
+
+This is enabled automatically when ``JSPI`` is used together with
+``MAIN_MODULE``.  Set it explicitly if JSPI is enabled at runtime via feature
+detection rather than via ``-sJSPI``.  Only takes effect when a side module
+is loaded from its binary (not from a pre-compiled ``WebAssembly.Module``).
+
+Default value: false
+
 .. _runtime_linked_libs:
 
 RUNTIME_LINKED_LIBS

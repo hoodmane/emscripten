@@ -1254,6 +1254,12 @@ def phase_linker_setup(options, linker_args):  # noqa: C901, PLR0912, PLR0915
     # Called from preamble.js once the main module is instantiated.
     settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$loadDylibs']
     settings.REQUIRED_EXPORTS += ['__stack_pointer']
+    if settings.ASYNCIFY == 2:
+      # JS frames cannot be suspended so late-bound symbols need wasm stubs.
+      settings.DYLINK_WASM_STUBS = 1
+
+  if settings.DYLINK_WASM_STUBS and not settings.MAIN_MODULE:
+    diagnostics.warning('unused-command-line-argument', 'DYLINK_WASM_STUBS has no effect without MAIN_MODULE')
 
   if settings.MAIN_MODULE == 1 or settings.SIDE_MODULE == 1:
     settings.LINKABLE = 1

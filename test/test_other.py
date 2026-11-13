@@ -2058,6 +2058,38 @@ Module['postRun'] = () => {
   def test_dylink_legacy(self):
     self.do_run_in_out_file_test('hello_world.c', cflags=['-sLEGACY_GL_EMULATION', '-sMAIN_MODULE=2'])
 
+  def test_dylink_wasm_stubs(self):
+    # DYLINK_WASM_STUBS is enabled automatically with -sJSPI (see
+    # test_dlfcn_jspi) but can also be enabled explicitly, e.g. when JSPI is
+    # used via runtime feature detection rather than -sJSPI.
+    # side_a calls into side_b.  The libraries are loaded in order at startup so
+    # when side_a is instantiated side_b is not yet available and the call goes
+    # via a late-binding stub.
+    self.run_process([EMCC, '-o', 'side_a.so', test_file('core/test_dlfcn_jspi_side_a.c'), '-sSIDE_MODULE'])
+    self.run_process([EMCC, '-o', 'side_b.so', test_file('core/test_dlfcn_jspi_side_b.c'), '-sSIDE_MODULE'])
+    create_file('main.c', r'''
+      #include <stdio.h>
+
+      typedef int (*F)();
+
+      int side_module_trampoline_a(F f);
+
+      int seventy_seven() { return 77; }
+
+      int main() {
+        printf("result %d\n", side_module_trampoline_a(seventy_seven));
+        printf("result %d\n", side_module_trampoline_a(seventy_seven));
+        return 0;
+      }
+    ''')
+    expected = 'side_module_trampoline_a\nside_module_trampoline_b\nresult 77\n' * 2
+    self.do_runf('main.c', expected, cflags=['-sMAIN_MODULE=2', '-sDYLINK_WASM_STUBS', 'side_a.so', 'side_b.so'])
+    self.assertContained('createWasmStub', read_file('main.js'))
+    # Without the setting, JS stubs are used.
+    self.do_runf('main.c', expected, cflags=['-sMAIN_MODULE=2', 'side_a.so', 'side_b.so'])
+    self.assertNotContained('createWasmStub', read_file('main.js'))
+    self.assertContained('DYLINK_WASM_STUBS has no effect without MAIN_MODULE', self.expect_fail([EMCC, test_file('hello_world.c'), '-sDYLINK_WASM_STUBS', '-Werror']))
+
   def test_dylink_exceptions_and_assertions(self):
     # Linking side modules using the STL and exceptions should not abort with
     # "function in Table but not functionsInTableMap" when using ASSERTIONS=2

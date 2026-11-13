@@ -506,7 +506,7 @@ var LibraryDylink = {
       end = offset + section_size;
       var name = getString();
       failIf(name !== 'dylink.0');
-#if JSPI
+#if DYLINK_WASM_STUBS
       // Remember where the remaining (non-custom) sections start so that we
       // can parse the import signatures below.
       var sectionsStart = end;
@@ -568,7 +568,7 @@ var LibraryDylink = {
     assert(offset == end);
 #endif
 
-#if JSPI
+#if DYLINK_WASM_STUBS
     // We need to know the signature of each function import so that we can
     // generate wasm stubs for late-bound symbols (see `createWasmStub`).
     // WebAssembly.Module.imports() only exposes types with
@@ -726,13 +726,15 @@ var LibraryDylink = {
   },
 #endif
 
-#if JSPI
+#if DYLINK_WASM_STUBS
   $stubModuleCache: {},
   // Late-bound symbols are normally resolved by a JS stub that looks up the
   // symbol on first call and then forwards the call.  With JSPI, a JS frame in
   // the middle of the stack prevents suspension (and the JS round trip also
-  // canonicalizes NaNs), so we instead generate a tiny wasm module per
-  // signature in which the onward call is made from wasm.
+  // canonicalizes NaNs), so when DYLINK_WASM_STUBS is set we instead generate
+  // a tiny wasm module per signature in which the onward call is made from
+  // wasm.  This is enabled automatically with -sJSPI, but can also be enabled
+  // explicitly when JSPI is used via runtime feature detection.
   //
   // The module exports a funcref table `t` of size 1, initially containing
   // `$init`.  Calling the exported stub `o` does `call_indirect` through slot
@@ -860,7 +862,7 @@ var LibraryDylink = {
     '$updateTableMap',
     '$wasmTable',
     '$addOnPostCtor',
-#if JSPI
+#if DYLINK_WASM_STUBS
     '$createWasmStub',
 #if ASSERTIONS
     '$warnOnce',
@@ -998,7 +1000,7 @@ var LibraryDylink = {
               }
               return resolved;
             };
-#if JSPI
+#if DYLINK_WASM_STUBS
             // Use a wasm stub so that the onward call doesn't go through a JS
             // frame (which would prevent suspending with JSPI).  This requires
             // knowing the import signature, which is only available if we were
