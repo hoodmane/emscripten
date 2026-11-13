@@ -506,6 +506,11 @@ var LibraryDylink = {
       end = offset + section_size;
       var name = getString();
       failIf(name !== 'dylink.0');
+#if JSPI
+      // Remember where the remaining (non-custom) sections start so that we
+      // can parse the import signatures below.
+      var sectionsStart = end;
+#endif
     }
 
     var customSection = { neededDynlibs: [], tlsExports: new Set(), weakImports: new Set(), runtimePaths: [] };
@@ -561,6 +566,83 @@ var LibraryDylink = {
     var tableAlign = Math.pow(2, customSection.tableAlign);
     assert(tableAlign === 1, `invalid tableAlign ${tableAlign}`);
     assert(offset == end);
+#endif
+
+#if JSPI
+    // We need to know the signature of each function import so that we can
+    // generate wasm stubs for late-bound symbols (see `createWasmStub`).
+    // WebAssembly.Module.imports() only exposes types with
+    // the (unshipped) type reflection proposal, so instead we parse the type
+    // and import sections of the binary directly.  When we are handed a
+    // pre-compiled WebAssembly.Module we have no access to the bytes and
+    // `importSigs` is left undefined.
+    if (sectionsStart !== undefined) {
+      var importSigs = customSection.importSigs = {};
+      var types = [];
+      var typeChars = {0x7f: 'i', 0x7e: 'j', 0x7d: 'f', 0x7c: 'd', 0x6f: 'e'};
+
+      function getValTypes() {
+        var count = getLEB();
+        var rtn = '';
+        while (count--) {
+          var code = getU8();
+          failIf(!(code in typeChars), `unsupported value type in import signature: 0x${code.toString(16)}`);
+          rtn += typeChars[code];
+        }
+        return rtn;
+      }
+
+      function skipLimits() {
+        var limitFlags = getU8();
+        getLEB(); // min
+        if (limitFlags & 0x1) getLEB(); // max
+      }
+
+      offset = sectionsStart;
+      while (offset < binary.length) {
+        var sectionId = getU8();
+        var sectionEnd = getLEB() + offset;
+        if (sectionId === 1 /* type */) {
+          var count = getLEB();
+          while (count--) {
+            failIf(getU8() !== 0x60, 'unsupported type definition (expected func type)');
+            var params = getValTypes();
+            var results = getValTypes();
+            failIf(results.length > 1, 'multivalue import signatures are not supported');
+            types.push((results || 'v') + params);
+          }
+        } else if (sectionId === 2 /* import */) {
+          var count = getLEB();
+          while (count--) {
+            getString(); // module name
+            var fieldName = getString();
+            var kind = getU8();
+            if (kind === 0 /* func */) {
+              importSigs[fieldName] = types[getLEB()];
+            } else if (kind === 1 /* table */) {
+              getU8(); // reftype
+              skipLimits();
+            } else if (kind === 2 /* memory */) {
+              skipLimits();
+            } else if (kind === 3 /* global */) {
+              getU8(); // valtype
+              getU8(); // mutability
+            } else if (kind === 4 /* tag */) {
+              getU8(); // attribute
+              getLEB(); // type index
+            } else {
+              failIf(true, `unknown import kind: ${kind}`);
+            }
+          }
+#if ASSERTIONS
+          assert(offset == sectionEnd);
+#endif
+          // The import section always follows the type section so we are done.
+          break;
+        }
+        offset = sectionEnd;
+      }
+    }
 #endif
 
 #if DYLINK_DEBUG
@@ -644,6 +726,125 @@ var LibraryDylink = {
   },
 #endif
 
+#if JSPI
+  $stubModuleCache: {},
+  // Late-bound symbols are normally resolved by a JS stub that looks up the
+  // symbol on first call and then forwards the call.  With JSPI, a JS frame in
+  // the middle of the stack prevents suspension (and the JS round trip also
+  // canonicalizes NaNs), so we instead generate a tiny wasm module per
+  // signature in which the onward call is made from wasm.
+  //
+  // The module exports a funcref table `t` of size 1, initially containing
+  // `$init`.  Calling the exported stub `o` does `call_indirect` through slot
+  // 0.  The first call therefore lands in `$init`, which calls the JS
+  // `resolve` import.  That import looks up the real symbol and writes it
+  // into slot 0, and then `$init` makes the onward call.  Since the JS
+  // resolver frame has returned by the time the target runs, suspending inside
+  // the target only crosses wasm frames.  All subsequent calls go straight
+  // from `o` to the target via `call_indirect`.
+  //
+  // For the signature 'ii' the generated module is equivalent to:
+  //
+  // (module
+  //   (type $sig (func (param i32) (result i32)))
+  //   (import "e" "r" (func $resolve))
+  //   (table $t (export "t") 1 funcref)
+  //   (elem (i32.const 0) $init)
+  //   (func $init (type $sig)
+  //     call $resolve
+  //     local.get 0
+  //     i32.const 0
+  //     call_indirect (type $sig))
+  //   (func (export "o") (type $sig)
+  //     local.get 0
+  //     i32.const 0
+  //     call_indirect (type $sig)))
+  $getStubModule__deps: ['$stubModuleCache', '$uleb128EncodeWithLen', '$generateTypePack'],
+  $getStubModule: (sig) => {
+    var cached = stubModuleCache[sig];
+    if (cached) {
+      return cached;
+    }
+    var numParams = sig.length - 1;
+    var forwardCall = [];
+    for (var i = 0; i < numParams; i++) {
+      forwardCall.push(0x20, i); // local.get i
+    }
+    forwardCall.push(
+      0x41, 0x00, // i32.const 0
+      0x11, 0x00, 0x00, // call_indirect (type 0) (table 0)
+      0x0b, // end
+    );
+    var bytes = Uint8Array.of(
+      0x00, 0x61, 0x73, 0x6d, // magic ("\0asm")
+      0x01, 0x00, 0x00, 0x00, // version: 1
+      0x01, // Type section
+        ...uleb128EncodeWithLen([
+          0x02, // count: 2
+          0x60, // type 0: sig
+            ...generateTypePack(sig.slice(1)),
+            ...generateTypePack(sig[0] === 'v' ? '' : sig[0]),
+          0x60, 0x00, 0x00, // type 1: () -> ()
+        ]),
+      0x02, 0x07, // Import section
+        // (import "e" "r" (func 0 (type 1)))
+        0x01, 0x01, 0x65, 0x01, 0x72, 0x00, 0x01,
+      0x03, 0x03, // Function section
+        0x02, 0x00, 0x00, // two functions (1 and 2), both of type 0
+      0x04, 0x04, // Table section
+        0x01, 0x70, 0x00, 0x01, // one funcref table with min size 1
+      0x07, 0x09, // Export section
+        0x02, // count: 2
+        0x01, 0x6f, 0x00, 0x02, // (export "o" (func 2))
+        0x01, 0x74, 0x01, 0x00, // (export "t" (table 0))
+      0x09, 0x07, // Element section
+        0x01, // count: 1
+        0x00, 0x41, 0x00, 0x0b, // active segment in table 0 at offset (i32.const 0)
+        0x01, 0x01, // one function: func 1 ($init)
+      0x0a, // Code section
+        ...uleb128EncodeWithLen([
+          0x02, // count: 2
+          // func 1 ($init)
+          ...uleb128EncodeWithLen([
+            0x00, // no locals
+            0x10, 0x00, // call 0 ($resolve)
+            ...forwardCall,
+          ]),
+          // func 2 (exported as "o")
+          ...uleb128EncodeWithLen([
+            0x00, // no locals
+            ...forwardCall,
+          ]),
+        ]),
+    );
+    return stubModuleCache[sig] = new WebAssembly.Module(bytes);
+  },
+
+  // Creates a wasm stub function with the given signature.  On first call the
+  // stub calls `resolve()` to find the target function and all calls are then
+  // forwarded to it.  See `getStubModule`.
+  $createWasmStub__deps: ['$getStubModule', '$convertJsFunctionToWasm'],
+  $createWasmStub: (sig, resolve) => {
+    var table;
+    var instance = new WebAssembly.Instance(getStubModule(sig), {'e': {'r': () => {
+      var resolved = resolve();
+      try {
+        table.set(0, resolved);
+      } catch (e) {
+        if (!(e instanceof TypeError)) {
+          throw e;
+        }
+        // `resolved` is not a wasm function (e.g. an EM_JS function from a
+        // side module), so it needs to be wrapped before being placed in the
+        // table.
+        table.set(0, convertJsFunctionToWasm(resolved, sig));
+      }
+    }}});
+    table = instance.exports['t'];
+    return instance.exports['o'];
+  },
+#endif
+
   // Loads a side module from binary data or compiled Module. Returns the module's exports or a
   // promise that resolves to its exports if the loadAsync flag is set.
   $loadWebAssemblyModule__docs: `
@@ -659,6 +860,12 @@ var LibraryDylink = {
     '$updateTableMap',
     '$wasmTable',
     '$addOnPostCtor',
+#if JSPI
+    '$createWasmStub',
+#if ASSERTIONS
+    '$warnOnce',
+#endif
+#endif
   ],
   $loadWebAssemblyModule: (binary, flags, libName, localScope, handle) => {
 #if DYLINK_DEBUG
@@ -784,12 +991,30 @@ var LibraryDylink = {
           // Return a stub function that will resolve the symbol
           // when first called.
           if (!(prop in stubs)) {
-            var resolved;
-            stubs[prop] = (...args) => {
-              resolved ||= resolveSymbol(prop);
+            var resolve = () => {
+              var resolved = resolveSymbol(prop);
               if (!resolved) {
                 throw new Error(`Dynamic linking error: cannot resolve symbol ${prop}`);
               }
+              return resolved;
+            };
+#if JSPI
+            // Use a wasm stub so that the onward call doesn't go through a JS
+            // frame (which would prevent suspending with JSPI).  This requires
+            // knowing the import signature, which is only available if we were
+            // given the module bytes rather than a compiled WebAssembly.Module.
+            var sig = metadata.importSigs?.[prop];
+            if (sig) {
+              stubs[prop] = createWasmStub(sig, resolve);
+              return stubs[prop];
+            }
+#if ASSERTIONS
+            warnOnce(`loadWebAssemblyModule: no import signature for '${prop}' (module was not loaded from binary); falling back to a JS stub, which cannot be suspended through with JSPI`);
+#endif
+#endif
+            var resolved;
+            stubs[prop] = (...args) => {
+              resolved ||= resolve();
               return resolved(...args);
             };
           }
